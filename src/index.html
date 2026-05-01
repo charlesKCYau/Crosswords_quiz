@@ -231,8 +231,9 @@
     let workbook = null;
     let currentPuzzle = null;
     let activeEntry = null;
-    // Keep track of how many hint letters have been revealed for each vocabulary entry.
-    // Key = entry.id, value = number of letters already shown, maximum 3.
+    // Keep track of which hint letter should be revealed next for each vocabulary entry.
+    // Key = entry.id, value = next letter index inside the first three letters.
+    // It cycles like this: 0 -> 1 -> 2 -> 0 -> 1 -> 2...
     const hintProgress = {};
 
     window.addEventListener('DOMContentLoaded', loadDefaultExcel);
@@ -504,9 +505,9 @@
         startButton.addEventListener('click', event => {
           event.stopPropagation();
 
-          // Each press reveals one more letter for this vocabulary.
-          // Example: 1st click reveals letter 1, 2nd click reveals letter 2,
-          // 3rd click reveals letter 3. Further clicks do not reveal more.
+          // Each press reveals one letter from the first three letters in a loop.
+          // Example: 1st click reveals letter 1, 2nd reveals letter 2,
+          // 3rd reveals letter 3, 4th goes back to letter 1 again.
           revealNextHintLetter(entry);
 
           // Focus and highlight the starting square so the user knows where to continue.
@@ -645,22 +646,23 @@
     }
 
     function revealNextHintLetter(entry) {
-      const alreadyShown = hintProgress[entry.id] || 0;
-      const nextIndex = alreadyShown;
+      const currentIndex = hintProgress[entry.id] || 0;
 
-      // Maximum three hint letters per vocabulary, and never beyond word length.
-      if (nextIndex >= 3 || nextIndex >= entry.positions.length) return;
+      // Only cycle through the first three letters, or fewer if the word is short.
+      const cycleLength = Math.min(3, entry.positions.length);
+      const letterIndex = currentIndex % cycleLength;
 
-      const pos = entry.positions[nextIndex];
+      const pos = entry.positions[letterIndex];
       const key = `${pos.r},${pos.c}`;
       const input = document.querySelector(`input[data-key="${key}"]`);
 
       if (input) {
         // Hint letters overwrite whatever the user typed in that square.
-        input.value = entry.answer.charAt(nextIndex);
+        input.value = entry.answer.charAt(letterIndex);
       }
 
-      hintProgress[entry.id] = nextIndex + 1;
+      // Move to the next hint letter. After the third letter, it loops back to the first.
+      hintProgress[entry.id] = (letterIndex + 1) % cycleLength;
     }
 
     function showEntryStart(entry) {
