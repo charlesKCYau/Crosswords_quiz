@@ -4,11 +4,58 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Vocabulary Crossword Player</title>
+
+  <!--
+    SheetJS / xlsx library
+    ---------------------------------------------------------------------------
+    Purpose:
+    - This external library lets the browser read .xlsx Excel files directly.
+    - The app uses it to load vocabulary_crossword_puzzles_20tabs.xlsx.
+    - XLSX.read(...) converts the Excel binary file into a JavaScript workbook.
+  -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
   <style>
+    /*
+      ===========================================================================
+      CSS DESIGN OVERVIEW
+      ===========================================================================
+
+      The page has two main panes:
+      1. Puzzle pane: contains the crossword grid.
+      2. Hint pane: contains Across and Down clues.
+
+      Desktop layout:
+      +---------------------------------------------------------------+
+      | Header                                                        |
+      +-----------------------------------------+---------------------+
+      | Puzzle pane                             | Hints pane          |
+      | wider                                   | narrower            |
+      +-----------------------------------------+---------------------+
+
+      Mobile layout:
+      +-----------------------+
+      | Header                |
+      +-----------------------+
+      | Puzzle pane           |
+      +-----------------------+
+      | Hints pane            |
+      +-----------------------+
+
+      Colour logic:
+      - White cell: incomplete answer / normal state.
+      - Yellow cell: completed vocabulary is correct.
+      - Red cell: completed vocabulary is wrong.
+      - Blue-ish cell: current focused cell.
+    */
+
     :root {
+      /* Base crossword square size on desktop. */
       --cell-size: 42px;
+
+      /* Focused square becomes slightly larger so typing feels clearer. */
       --cell-size-active: 48px;
+
       --grid-gap: 2px;
       --border: #cfcfcf;
       --text: #222;
@@ -27,6 +74,7 @@
       background: #fafafa;
     }
 
+    /* Header contains title, worksheet selector, buttons and status text. */
     header {
       padding: 16px 20px;
       background: white;
@@ -47,6 +95,11 @@
       padding: 8px 10px;
     }
 
+    /*
+      Main layout:
+      - Puzzle pane gets flexible wide space.
+      - Hint pane has fixed 360px width on desktop.
+    */
     main {
       display: grid;
       grid-template-columns: minmax(520px, 1fr) 360px;
@@ -63,10 +116,15 @@
       box-shadow: 0 1px 4px rgba(0,0,0,0.04);
     }
 
+    /* Allows large puzzles to scroll horizontally if needed. */
     .puzzle-pane {
       overflow: auto;
     }
 
+    /*
+      The crossword grid is generated dynamically by JavaScript.
+      JavaScript sets grid-template-columns based on puzzle.cols.
+    */
     .grid {
       display: inline-grid;
       gap: var(--grid-gap);
@@ -74,6 +132,7 @@
       padding: 4px;
     }
 
+    /* Normal crossword cell. */
     .cell {
       position: relative;
       width: var(--cell-size);
@@ -86,11 +145,13 @@
       transition: width 0.08s, height 0.08s, background 0.12s;
     }
 
+    /* Empty grid positions are invisible but still keep grid alignment. */
     .cell.empty {
       border: none;
       background: transparent;
     }
 
+    /* Each non-empty crossword cell contains one input box. */
     .cell input {
       width: 100%;
       height: 100%;
@@ -103,6 +164,7 @@
       background: transparent;
     }
 
+    /* Focused input cell. */
     .cell.focused {
       width: var(--cell-size-active);
       height: var(--cell-size-active);
@@ -110,11 +172,13 @@
       z-index: 3;
     }
 
+    /* Answer state colouring. */
     .cell.correct { background: var(--correct); }
     .cell.wrong { background: var(--wrong); }
     .cell.focused.correct { background: var(--correct); }
     .cell.focused.wrong { background: var(--wrong); }
 
+    /* Used when Hint button highlights the answer starting square. */
     .cell.start-highlight {
       outline: 3px solid #2563eb;
       outline-offset: 2px;
@@ -127,6 +191,10 @@
       cursor: pointer;
     }
 
+    /*
+      Small grey clue number in the top-left corner of the first cell.
+      The number comes from Excel cell comments / notes.
+    */
     .num {
       position: absolute;
       top: 2px;
@@ -171,6 +239,11 @@
       margin-top: 8px;
     }
 
+    /*
+      Responsive design:
+      - On narrow screens, stack puzzle pane above hint pane.
+      - Reduce crossword cell size so mobile users can still see the puzzle.
+    */
     @media (max-width: 800px) {
       :root {
         --cell-size: 34px;
@@ -193,6 +266,18 @@
   </style>
 </head>
 <body>
+  <!--
+    HEADER CONTROLS
+    ---------------------------------------------------------------------------
+    sheetSelect:
+      Lets user switch between worksheet tabs / puzzles.
+
+    Clear Answers:
+      Clears all typed letters and resets hint progress.
+
+    Show All Answers:
+      Fills every crossword square using the hidden answer key read from Excel.
+  -->
   <header>
     <h1>Vocabulary Crossword</h1>
     <select id="sheetSelect" disabled></select>
@@ -201,6 +286,15 @@
     <span id="status" class="status">Loading vocabulary_crossword_puzzles_20tabs.xlsx...</span>
   </header>
 
+  <!--
+    MAIN UI
+    ---------------------------------------------------------------------------
+    Left / top pane:
+      Puzzle grid generated by buildGrid().
+
+    Right / bottom pane:
+      Clues generated by buildHints().
+  -->
   <main>
     <section class="pane puzzle-pane">
       <div id="grid" class="grid"></div>
@@ -219,7 +313,134 @@
   </main>
 
   <script>
+    /*
+      ===========================================================================
+      JAVASCRIPT PROGRAM OVERVIEW
+      ===========================================================================
+
+      This app reads a crossword Excel workbook and converts each worksheet into
+      an interactive puzzle.
+
+      Important assumption about the Excel workbook:
+      - The crossword grid is on the left side.
+      - Each answer cell contains one visible uppercase letter in Excel.
+      - The starting cell has an Excel comment/note containing its clue number.
+      - The clue area is on the right side and uses sections like:
+
+          Across
+          1    (n.) explanation...
+          2    (v.) explanation...
+
+          Down
+          3    (adj.) explanation...
+
+      Runtime UML-style flow:
+
+        Browser page loaded
+              |
+              v
+        loadDefaultExcel()
+              |
+              | fetch(EXCEL_FILE)
+              | XLSX.read(...)
+              v
+        Workbook object created
+              |
+              v
+        renderSheet(first sheet)
+              |
+              +-------------------------------+
+              |                               |
+              v                               v
+        parseWorksheet(ws)              buildGrid(puzzle)
+              |                               |
+              v                               v
+        detectEntries()                 Create HTML inputs
+              |
+              v
+        attachClues()
+              |
+              v
+        buildHints(puzzle)
+
+      User interaction UML-style flow:
+
+        User clicks clue
+              |
+              v
+        activateEntry(entry)
+              |
+              v
+        focusPosition(first cell)
+
+        User types letter
+              |
+              v
+        handleInput(event)
+              |
+              +--> store uppercase letter
+              +--> evaluateAllEntries()
+              +--> move to next cell in active word
+
+        User presses Delete / Backspace
+              |
+              v
+        handleKeyDown(event)
+              |
+              +--> clear current cell
+              +--> evaluateAllEntries()
+              +--> move to previous cell in active word
+
+        User clicks Hint button
+              |
+              v
+        revealNextHintLetter(entry)
+              |
+              +--> reveal letter 1, then 2, then 3, then loop back
+              +--> showEntryStart(entry)
+              +--> evaluateAllEntries()
+
+        User clicks Show All Answers
+              |
+              v
+        showAllAnswers()
+              |
+              +--> copy every answer from currentPuzzle.cells into inputs
+
+      Main data structures:
+
+      workbook:
+        The full Excel workbook returned by XLSX.read().
+
+      currentPuzzle:
+        {
+          cells:   { "row,col": "A" },       // answer key
+          numbers: { "row,col": 1 },         // clue numbers from comments
+          entries: [Entry, Entry, ...],       // Across / Down word objects
+          rows: number,
+          cols: number
+        }
+
+      Entry object:
+        {
+          id: "Across-1-0-0",
+          number: 1,
+          direction: "Across" or "Down",
+          positions: [{ r:0, c:0 }, ...],
+          answer: "ADDRESS",
+          clue: "(n./v.) details of where someone lives / to speak to"
+        }
+
+      Coordinate system:
+      - SheetJS uses 0-based row/column indexes.
+      - Therefore internal keys such as "0,0" refer to the first row and first col.
+      - XLSX.utils.encode_cell({ r, c }) converts those indexes into Excel addresses.
+    */
+
+    // Excel file to load automatically from the same directory as this HTML file.
     const EXCEL_FILE = 'vocabulary_crossword_puzzles_20tabs.xlsx';
+
+    // DOM references for controls and output areas.
     const sheetSelect = document.getElementById('sheetSelect');
     const clearButton = document.getElementById('clearButton');
     const showAnswersButton = document.getElementById('showAnswersButton');
@@ -228,27 +449,54 @@
     const downHintsEl = document.getElementById('downHints');
     const statusEl = document.getElementById('status');
 
+    // workbook holds the parsed Excel workbook.
     let workbook = null;
+
+    // currentPuzzle holds the parsed data for the currently selected worksheet.
     let currentPuzzle = null;
+
+    // activeEntry is the word currently being typed.
+    // It controls automatic cursor movement after each typed letter.
     let activeEntry = null;
+
     // Keep track of which hint letter should be revealed next for each vocabulary entry.
     // Key = entry.id, value = next letter index inside the first three letters.
     // It cycles like this: 0 -> 1 -> 2 -> 0 -> 1 -> 2...
     const hintProgress = {};
 
+    /*
+      Event wiring:
+      - DOMContentLoaded starts Excel loading.
+      - Changing the dropdown renders another worksheet.
+      - Buttons call their corresponding control functions.
+    */
     window.addEventListener('DOMContentLoaded', loadDefaultExcel);
     sheetSelect.addEventListener('change', () => renderSheet(sheetSelect.value));
     clearButton.addEventListener('click', clearAnswers);
     showAnswersButton.addEventListener('click', showAllAnswers);
 
     async function loadDefaultExcel() {
+      /*
+        Load the Excel file from the same folder.
+
+        Important browser note:
+        - fetch() usually does not work properly when opening the HTML by double
+          clicking it as file://.
+        - Run a local server instead, for example:
+            python3 -m http.server 8000
+          then open:
+            http://localhost:8000/crossword.html
+      */
       try {
         const response = await fetch(EXCEL_FILE);
         if (!response.ok) throw new Error(`Cannot load ${EXCEL_FILE}`);
 
         const data = await response.arrayBuffer();
+
+        // cellComments:true is needed because clue numbers are stored in Excel comments.
         workbook = XLSX.read(data, { type: 'array', cellComments: true });
 
+        // Fill the worksheet selector with all sheet names.
         sheetSelect.innerHTML = '';
         workbook.SheetNames.forEach(name => {
           const option = document.createElement('option');
@@ -257,9 +505,12 @@
           sheetSelect.appendChild(option);
         });
 
+        // Enable controls after workbook has loaded successfully.
         sheetSelect.disabled = false;
         clearButton.disabled = false;
         showAnswersButton.disabled = false;
+
+        // Render the first puzzle by default.
         renderSheet(workbook.SheetNames[0]);
       } catch (error) {
         statusEl.textContent = `Failed to load ${EXCEL_FILE}. Put the Excel file in the same folder and open this page through a local web server.`;
@@ -268,6 +519,15 @@
     }
 
     function renderSheet(sheetName) {
+      /*
+        Render one worksheet as a playable puzzle.
+
+        Steps:
+        1. Get worksheet object from workbook.
+        2. Parse worksheet into currentPuzzle.
+        3. Build the crossword grid.
+        4. Build the Across / Down clue lists.
+      */
       const ws = workbook.Sheets[sheetName];
       currentPuzzle = parseWorksheet(ws);
       activeEntry = null;
@@ -277,6 +537,17 @@
     }
 
     function parseWorksheet(ws) {
+      /*
+        Convert raw Excel worksheet into a JavaScript puzzle object.
+
+        This function is responsible for reading:
+        - answer letters from the left grid area
+        - clue numbers from Excel comments
+        - clue text from the right clue area
+
+        It delegates word detection to detectEntries() and clue mapping to
+        attachClues().
+      */
       const range = XLSX.utils.decode_range(ws['!ref']);
       const cells = {};
       const numbers = {};
@@ -293,12 +564,16 @@
           if (!cell || cell.v == null) continue;
 
           const text = String(cell.v).trim();
+
+          // Only a single letter is treated as a crossword answer cell.
+          // Clue text is longer, so it is ignored here.
           if (/^[A-Za-z]$/.test(text)) {
             const key = `${r},${c}`;
             cells[key] = text.toUpperCase();
             maxGridRow = Math.max(maxGridRow, r);
             maxGridCol = Math.max(maxGridCol, c);
 
+            // Starting clue numbers are stored in Excel comments / notes.
             const commentNumber = extractCommentNumber(cell.c);
             if (commentNumber) numbers[key] = commentNumber;
           }
@@ -318,6 +593,14 @@
     }
 
     function extractCommentNumber(comments) {
+      /*
+        Excel comments are returned by SheetJS as an array.
+        We join all comment text and extract the first number.
+
+        Example:
+        comment text = "12"
+        returns 12
+      */
       if (!comments || !comments.length) return null;
       const raw = comments.map(c => c.t || '').join(' ');
       const match = raw.match(/\d+/);
@@ -325,6 +608,22 @@
     }
 
     function detectEntries(cells, numbers) {
+      /*
+        Detect Across and Down words from the answer grid.
+
+        Crossword start rules:
+        - Across starts when:
+            current cell has a letter
+            left cell is empty
+            right cell has a letter
+
+        - Down starts when:
+            current cell has a letter
+            above cell is empty
+            below cell has a letter
+
+        A starting cell can start both an Across and Down word.
+      */
       const entries = [];
       const has = (r, c) => cells[`${r},${c}`];
 
@@ -360,6 +659,12 @@
     }
 
     function makeEntry(number, direction, positions, cells) {
+      /*
+        Create one Entry object.
+
+        positions tells the app where each letter belongs.
+        answer is built by reading the letters from cells in that order.
+      */
       return {
         id: `${direction}-${number}-${positions[0].r}-${positions[0].c}`,
         number,
@@ -371,6 +676,26 @@
     }
 
     function attachClues(ws, entries, range) {
+      /*
+        Attach clue explanation text to each Entry.
+
+        Excel clue layout supported:
+
+          Across
+          1    explanation text
+          2    explanation text
+
+          Down
+          3    explanation text
+
+        Logic:
+        - Scan every cell in the worksheet.
+        - When we see "Across", current section becomes Across.
+        - When we see "Down", current section becomes Down.
+        - When we see a number, parse it as a clue number.
+        - If the explanation is not in the same cell, read cells to the right
+          using readNearbyClueText().
+      */
       const clueMap = { Across: {}, Down: {} };
       let section = null;
 
@@ -407,6 +732,23 @@
     }
 
     function parseClueCellText(text, currentSection) {
+      /*
+        Parse a clue number cell.
+
+        Supported formats:
+        - "1" when the current section is already Across or Down
+        - "1. explanation"
+        - "1 Across: explanation"
+        - "1 Down: explanation"
+
+        Returns:
+        {
+          number: 1,
+          direction: "Across",
+          clue: "explanation text"
+        }
+        or null if the cell is not a clue marker.
+      */
       const parts = text.replace(':', ' ').replace('.', ' ').trim().split(' ').filter(Boolean);
       if (!parts.length) return null;
       const number = Number(parts[0]);
@@ -432,6 +774,16 @@
     }
 
     function readNearbyClueText(ws, row, col, range) {
+      /*
+        Read clue explanation text from cells to the right.
+
+        This is needed because the Excel generator writes:
+          Column Q: clue number
+          Column R: clue explanation
+
+        The parser checks up to 4 cells to the right and returns the first cell
+        that looks like clue text rather than another number or section title.
+      */
       for (let offset = 1; offset <= 4; offset++) {
         const nextCol = col + offset;
         if (nextCol > range.e.c) break;
@@ -452,6 +804,14 @@
     }
 
     function buildGrid(puzzle) {
+      /*
+        Build the visible crossword grid.
+
+        Important:
+        - The Excel letters are NOT displayed as text.
+        - Instead, every answer cell becomes an empty <input>.
+        - The answer key remains stored in puzzle.cells.
+      */
       gridEl.innerHTML = '';
       gridEl.style.gridTemplateColumns = `repeat(${puzzle.cols}, var(--cell-size))`;
 
@@ -464,6 +824,7 @@
           cellDiv.dataset.key = key;
 
           if (value) {
+            // Add small grey clue number if this is a starting cell.
             const number = puzzle.numbers[key];
             if (number) {
               const num = document.createElement('span');
@@ -472,6 +833,7 @@
               cellDiv.appendChild(num);
             }
 
+            // Create one-letter input box.
             const input = document.createElement('input');
             input.maxLength = 1;
             input.autocomplete = 'off';
@@ -488,6 +850,16 @@
     }
 
     function buildHints(puzzle) {
+      /*
+        Build clickable Across / Down clue lists.
+
+        Each clue row contains:
+        - clue number and explanation
+        - Hint button
+
+        Clicking the clue itself activates the answer and focuses the first cell.
+        Clicking Hint reveals one of the first three letters in a cycle.
+      */
       acrossHintsEl.innerHTML = '';
       downHintsEl.innerHTML = '';
 
@@ -527,6 +899,14 @@
     }
 
     function activateEntry(entry) {
+      /*
+        Make this word the active typing direction.
+
+        Why activeEntry matters:
+        - handleInput() uses activeEntry to know where the cursor should move.
+        - If activeEntry is Across, typing moves horizontally.
+        - If activeEntry is Down, typing moves vertically.
+      */
       activeEntry = entry;
       document.querySelectorAll('.hint-list li').forEach(li => {
         li.classList.toggle('active', li.dataset.entryId === entry.id);
@@ -536,6 +916,12 @@
     }
 
     function handleFocus(key) {
+      /*
+        Called when any crossword input receives focus.
+
+        If user manually clicks a square, we try to infer which entry they mean.
+        The first entry containing that cell becomes active.
+      */
       document.querySelectorAll('.cell').forEach(cell => cell.classList.remove('focused'));
       const cell = document.querySelector(`.cell[data-key="${key}"]`);
       if (cell) cell.classList.add('focused');
@@ -547,6 +933,14 @@
     }
 
     function handleKeyDown(event) {
+      /*
+        Handle correction keys.
+
+        Requirement:
+        - User uses Delete / Backspace to correct letters.
+        - Current cell is cleared.
+        - Cursor moves one step backward in the active word where possible.
+      */
       const input = event.target;
       const key = input.dataset.key;
 
@@ -560,6 +954,15 @@
     }
 
     function handleInput(event) {
+      /*
+        Handle normal letter typing.
+
+        Requirement:
+        - User enters one English letter.
+        - New letter overwrites existing letter automatically.
+        - Cursor moves to next square in the active word.
+        - No arrow buttons are required.
+      */
       const input = event.target;
       const letter = input.value.slice(-1).toUpperCase();
 
@@ -577,6 +980,7 @@
     }
 
     function focusPosition(pos) {
+      /* Move browser focus to a specific crossword coordinate. */
       const input = document.querySelector(`input[data-key="${pos.r},${pos.c}"]`);
       if (input) {
         input.focus();
@@ -585,22 +989,42 @@
     }
 
     function entryContains(entry, key) {
+      /* Return true if this Entry uses the cell represented by key. */
       return entry.positions.some(p => `${p.r},${p.c}` === key);
     }
 
     function nextPositionInActiveEntry(key) {
+      /* Find the next square in the active answer after the current key. */
       if (!activeEntry) return null;
       const i = activeEntry.positions.findIndex(p => `${p.r},${p.c}` === key);
       return i >= 0 && i < activeEntry.positions.length - 1 ? activeEntry.positions[i + 1] : null;
     }
 
     function previousPositionInActiveEntry(key) {
+      /* Find the previous square in the active answer before the current key. */
       if (!activeEntry) return null;
       const i = activeEntry.positions.findIndex(p => `${p.r},${p.c}` === key);
       return i > 0 ? activeEntry.positions[i - 1] : null;
     }
 
     function evaluateAllEntries() {
+      /*
+        Check every Across and Down answer and colour its cells.
+
+        Logic:
+        1. Remove all previous correct/wrong colours.
+        2. For each entry:
+           - collect typed letters from its positions
+           - if any letter is missing, leave cells white
+           - if complete and exactly matches answer, colour yellow
+           - if complete but incorrect, colour red
+
+        Note:
+        - A cell can belong to both Across and Down.
+        - This simple colouring pass may let the later checked entry override
+          the earlier visual state. For the current workbook design this is fine,
+          but it can be adjusted if you want mixed-state handling later.
+      */
       document.querySelectorAll('.cell').forEach(cell => {
         cell.classList.remove('correct', 'wrong');
       });
@@ -625,6 +1049,13 @@
     }
 
     function clearAnswers() {
+      /*
+        Reset the current puzzle:
+        - remove all typed letters
+        - remove colour states
+        - remove active clue highlight
+        - reset Hint cycling progress
+      */
       document.querySelectorAll('.cell input').forEach(input => input.value = '');
       document.querySelectorAll('.cell').forEach(cell => {
         cell.classList.remove('correct', 'wrong', 'focused', 'start-highlight');
@@ -637,6 +1068,12 @@
     }
 
     function showAllAnswers() {
+      /*
+        Fill every crossword square with its answer key.
+
+        The answer key is not shown initially, but it is stored in
+        currentPuzzle.cells because it was read from the Excel worksheet.
+      */
       if (!currentPuzzle) return;
       Object.entries(currentPuzzle.cells).forEach(([key, letter]) => {
         const input = document.querySelector(`input[data-key="${key}"]`);
@@ -646,6 +1083,22 @@
     }
 
     function revealNextHintLetter(entry) {
+      /*
+        Reveal one hint letter for this entry.
+
+        Requirement:
+        - Each click reveals one of the first three letters.
+        - The sequence loops forever:
+            click 1 -> letter 1
+            click 2 -> letter 2
+            click 3 -> letter 3
+            click 4 -> letter 1 again
+
+        Implementation:
+        - hintProgress[entry.id] stores the next letter index.
+        - cycleLength is 3, unless the word has fewer than 3 letters.
+        - The revealed letter overwrites any user-entered letter in that square.
+      */
       const currentIndex = hintProgress[entry.id] || 0;
 
       // Only cycle through the first three letters, or fewer if the word is short.
@@ -666,6 +1119,13 @@
     }
 
     function showEntryStart(entry) {
+      /*
+        Focus and highlight the first square of an entry.
+
+        Used by:
+        - Hint button
+        - clue click through activateEntry()
+      */
       activateEntry(entry);
       document.querySelectorAll('.cell').forEach(cell => cell.classList.remove('start-highlight'));
       const start = entry.positions[0];
